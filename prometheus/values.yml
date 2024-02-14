@@ -1,0 +1,9 @@
+prometheus:
+  additionalScrapeConfigs:
+    enabled: true
+    type: internal
+    internal:
+      jobList:
+      - job_name: 'finops-tool'
+        static_configs:
+        - targets: ['172.22.230.232:8000']
