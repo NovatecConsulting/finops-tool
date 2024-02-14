@@ -15,7 +15,7 @@ from aws_pricing_api import ec_pricing_api
 from aws_pricing_api import initialize_rds_price_dict
 from aws_pricing_api import initialize_ec_price_dict
 
-connMattermost = http.client.HTTPSConnection("matter.i.mercedes-benz.com")
+connMattermost = http.client.HTTPSConnection("you_mattermost_domain")
 headersMattermost = {
     "Content-Type": "application/json"
 }
