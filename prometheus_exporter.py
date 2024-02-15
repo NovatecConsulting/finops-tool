@@ -1,3 +1,4 @@
+import time
 import boto3
 import argparse
 import http.client
@@ -5,7 +6,7 @@ import json
 import schedule
 
 from prometheus_client import start_http_server, Gauge
-from datetime import datetime
+from datetime import date
 
 from aws_cloudwatch_api import rds_cloudwatch_api
 from aws_cloudwatch_api import ec_cloudwatch_api
@@ -42,6 +43,16 @@ current_costs = Gauge("current_costs", "Shows the current running costs of the r
 monthly_costs = Gauge("monthly_costs", "Shows the forecast of this month's costs", ["resource_name", "account", "service"])
 total_current_costs = Gauge("total_current_costs", "Shows the total current running costs of this service", ["account", "service"])
 total_monthly_costs = Gauge("total_monthly_costs", "Shows the total forecast of this month's costs", ["account", "service"])
+
+def update_pricing_api_info():
+    try:
+        if date.today().day == 1:
+            ec_pricing_api.init_ec_price_dict(pricing_client)
+            rds_pricing_api.init_rds_price_dict(pricing_client)
+            print("[INFO] Pricing API info has been updated successfully!")
+    except Exception as e:
+        print(e)
+        print("[ERROR] Failed to update pricing API info!")
 
 def collect_ec_metrics(account, ec_client):
     try:
@@ -238,9 +249,11 @@ if __name__ == "__main__":
     start_http_server(8000)
 
     # append methods to scheduler
+    schedule.every().day.do(update_pricing_api_info)
     schedule.every().hour.at(":00").do(fetch_metrics)
-    schedule.every().day.at("15:10").do(fetch_recommendations)
+    schedule.every().monday.at("08:30").do(fetch_recommendations)
 
     # start scheduled methods
     while True:
         schedule.run_pending()
+        time.sleep(1)
