@@ -4,6 +4,7 @@ import argparse
 import http.client
 import json
 import schedule
+import logging
 
 from prometheus_client import start_http_server, Gauge
 from datetime import date
@@ -16,27 +17,33 @@ from aws_pricing_api import ec_pricing_api
 from aws_pricing_api import initialize_rds_price_dict
 from aws_pricing_api import initialize_ec_price_dict
 
-connMattermost = http.client.HTTPSConnection("you_mattermost_domain")
+connMattermost = http.client.HTTPSConnection("domain")
 headersMattermost = {
     "Content-Type": "application/json"
 }
 
+# general vars
 account_ids = []
-role_name = "finops-tool-member-role"
-enterprise_discount = 0.34
+role_name = "finops-tool-member-role" # default name for finops tool member
+enterprise_discount = 0.00
+
+# account id to team mapping
+teams = dict()
+team_short_names_to_webhook = dict()
 
 sts_client = boto3.client("sts", region_name="eu-central-1")
 pricing_client = boto3.client("pricing", region_name="eu-central-1")
 rds_client = boto3.client("rds", region_name="eu-central-1")
 cloudwatch_client = boto3.client("cloudwatch", region_name="eu-central-1")
 ec_client = boto3.client("elasticache", region_name="eu-central-1")
+s3_client = boto3.client("s3", region_name="eu-central-1")
 
 # initialization of service pricing dictionaries
 initialize_rds_price_dict(pricing_client)
-print("Initialized RDS Pricing API Dictionary!")
+logging.log(50, "Initialized RDS Pricing API Dictionary!")
 
 initialize_ec_price_dict(pricing_client)
-print("Initialized EC Pricing API Dictionary!")
+logging.log(50, "Initialized EC Pricing API Dictionary!")
 
 # Prometheus Gauges
 current_costs = Gauge("current_costs", "Shows the current running costs of the resource", ["resource_name", "account", "service"])
@@ -108,7 +115,7 @@ def generate_ec_recommendations(account, ec_client, cloudwatch_client):
                         msg += f"\n Reserved (All Upfront, 1yr) monthly costs: {round(possible_clusters[p_cluster]['prices']['Reserved']['AllUpfront']['1yr'], 2)}"
                         msg += f"\n Reserved (All Upfront, 3yr) monthly costs: {round(possible_clusters[p_cluster]['prices']['Reserved']['AllUpfront']['3yr'], 2)}"
 
-            send_to_mattermost(msg)
+            send_to_mattermost(account, msg)
     except Exception as e:
         print(e)
         print(f"[EC] Recommendations could not be generated, error in account: {account}")
@@ -164,7 +171,7 @@ def generate_rds_recommendations(account, rds_client, cloudwatch_client):
                     msg += f"\n Reserved (All Upfront, 1yr) monthly costs: {round(possible_instances[p_instance]['prices']['Reserved']['AllUpfront']['1yr'], 2)}"
                     msg += f"\n Reserved (All Upfront, 3yr) monthly costs: {round(possible_instances[p_instance]['prices']['Reserved']['AllUpfront']['3yr'], 2)}"
 
-            send_to_mattermost(msg)
+            send_to_mattermost(account, msg)
     except Exception as e:
         print(e)
         print(f"[RDS] Recommendations could not be generated, error in account: {account}")
@@ -172,56 +179,108 @@ def generate_rds_recommendations(account, rds_client, cloudwatch_client):
 def fetch_metrics():
     for account in account_ids:
         print(account)
-        assume_session = account_assume_session(account)
 
-        sts_assumed_client = assume_session.client("sts", region_name="eu-central-1")
-        rds_assumed_client = assume_session.client("rds", region_name="eu-central-1")
-        cloudwatch_assumed_client = assume_session.client("cloudwatch", region_name="eu-central-1")
-        ec_assumed_client = assume_session.client("elasticache", region_name="eu-central-1")
+        try:
+            assume_session = account_assume_session(account)
 
-        # Check if right role assumed
-        response = sts_assumed_client.get_caller_identity()
-        print(response["Arn"])
+            sts_assumed_client = assume_session.client("sts", region_name="eu-central-1")
+            rds_assumed_client = assume_session.client("rds", region_name="eu-central-1")
+            cloudwatch_assumed_client = assume_session.client("cloudwatch", region_name="eu-central-1")
+            ec_assumed_client = assume_session.client("elasticache", region_name="eu-central-1")
 
-        collect_ec_metrics(account, ec_assumed_client)
-        collect_rds_metrics(account, rds_assumed_client, cloudwatch_assumed_client)
+            # Check if right role assumed
+            response = sts_assumed_client.get_caller_identity()
+            print(response["Arn"])
+
+            collect_ec_metrics(account, ec_assumed_client)
+            collect_rds_metrics(account, rds_assumed_client, cloudwatch_assumed_client)
+        except Exception as e:
+            print(e)
+            print(f"[ERROR] Could not fetch metrics!")
 
 def fetch_recommendations():
     for account in account_ids:
         print(account)
-        assume_session = account_assume_session(account)
 
-        sts_assumed_client = assume_session.client("sts", region_name="eu-central-1")
-        rds_assumed_client = assume_session.client("rds", region_name="eu-central-1")
-        cloudwatch_assumed_client = assume_session.client("cloudwatch", region_name="eu-central-1")
-        ec_assumed_client = assume_session.client("elasticache", region_name="eu-central-1")
+        try:
+            assume_session = account_assume_session(account)
 
-        # Check if right role assumed
-        response = sts_assumed_client.get_caller_identity()
-        print(response["Arn"])
+            sts_assumed_client = assume_session.client("sts", region_name="eu-central-1")
+            rds_assumed_client = assume_session.client("rds", region_name="eu-central-1")
+            cloudwatch_assumed_client = assume_session.client("cloudwatch", region_name="eu-central-1")
+            ec_assumed_client = assume_session.client("elasticache", region_name="eu-central-1")
 
-        generate_ec_recommendations(account, ec_assumed_client, cloudwatch_assumed_client)
-        generate_rds_recommendations(account, rds_assumed_client, cloudwatch_assumed_client)
+            # Check if right role assumed
+            response = sts_assumed_client.get_caller_identity()
+            print(response["Arn"])
+
+            update_teams_json()
+            generate_ec_recommendations(account, ec_assumed_client, cloudwatch_assumed_client)
+            generate_rds_recommendations(account, rds_assumed_client, cloudwatch_assumed_client)
+        except Exception as e:
+            print(e)
+            print(f"[ERROR] Could not fetch recommendations")
 
 def account_assume_session(account):
-    role_arn = f"arn:aws:iam::{account}:role/{role_name}"
-    response = sts_client.assume_role(
-        RoleArn=role_arn,
-        RoleSessionName="finops-tool"
-    )
+    try:
+        role_arn = f"arn:aws:iam::{account}:role/{role_name}"
+        response = sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="finops-tool"
+        )
 
-    credentials = response["Credentials"]
+        credentials = response["Credentials"]
 
-    assume_session = boto3.Session(
-        aws_access_key_id=credentials["AccessKeyId"],
-        aws_secret_access_key=credentials["SecretAccessKey"],
-        aws_session_token=credentials["SessionToken"]
-    )
+        assume_session = boto3.Session(
+            aws_access_key_id=credentials["AccessKeyId"],
+            aws_secret_access_key=credentials["SecretAccessKey"],
+            aws_session_token=credentials["SessionToken"]
+        )
 
-    return assume_session
+        return assume_session
+    except Exception as e:
+        print(e)
+        print(f"[ERROR] Could not assume session for: {account}!")
 
-def send_to_mattermost(msg):
-    url = "mattermost_webhook" # enter your webhook
+def update_teams_json():
+    file_obj = s3_client.get_object(Bucket="bucket_name", Key="file_name")
+    file_content = file_obj["Body"].read().decode("utf-8")
+
+    teams_file = json.loads(file_content)
+    # populate dicts
+    # implement own logic
+
+def send_to_mattermost(account, msg):
+    team_short_name = ""
+    stage = "play/non-prod/prod/no-stage"
+
+    # get the team short name of the account
+    for team in teams.keys():
+        if account in teams[team]:
+            team_short_name = team
+
+            if team_short_name == "to":
+                if account == teams[team][0]:
+                    stage = "non-prod"
+                else:
+                    stage = "prod"
+            else:
+                if account == teams[team][0]:
+                    stage = "dev"
+                elif account == teams[team][1]:
+                    stage = "int"
+                elif account == teams[team][2]:
+                    stage = "prod"
+
+    if team_short_name == "":
+        team_short_name = "core"
+
+    mattermostUrl = team_short_names_to_webhook[team_short_name]
+    print(team_short_name)
+    print(stage)
+    print(mattermostUrl)
+
+    url = "webhook"
     split_url = url.split('/')
     url_post_to_mattermost = "/" + split_url[len(split_url) - 2] + "/" + split_url[len(split_url) - 1]
 
@@ -237,13 +296,25 @@ def send_to_mattermost(msg):
          print("sth went wrong: ", e)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Read CSV File which contains all AWS Account IDs")
-    parser.add_argument("input_file", type=argparse.FileType("r"), help="Path to the CSV containing the AWS Account IDs")
-    args = parser.parse_args()
 
-    # fetch account IDs
-    for account in args.input_file.readlines():
-        account_ids.append(account.strip())
+    try:
+        parser = argparse.ArgumentParser(description="Reads arguments for finops tool")
+        parser.add_argument("role_name", type=str, help="Name of the finops tool member role")
+        parser.add_argument("enterprise_discount", type=float, help="Percentage of enterprise discount, e.g. 0.25")
+        parser.add_argument("input_file", type=argparse.FileType("r"), help="Path to the CSV containing the AWS Account IDs")
+        args = parser.parse_args()
+
+        role_name = args.role_name
+        enterprise_discount = args.enterprise_discount
+
+        # fetch account IDs
+        for account in args.input_file.readlines():
+            account_ids.append(account.strip())
+            logging.log(50, account.strip())
+
+    except Exception as e:
+        print(e)
+        print("[ERROR] Could not read input file!")
 
     # start server
     start_http_server(8000)

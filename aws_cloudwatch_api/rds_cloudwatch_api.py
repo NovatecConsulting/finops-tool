@@ -13,21 +13,19 @@ def get_rds_on_demand_instances(client):
         allocated_storage = db_instance["AllocatedStorage"] # in GB -> just provisioned storage is billed -> get from cloudwatch!
         deployment_option = db_instance["MultiAZ"] # boolean
         storage_type = db_instance["StorageType"] # for example gp2
-        storage_throughput = db_instance["StorageThroughput"]
         network_type = db_instance["NetworkType"]
         iops = 0
+        storage_throughput = 0
         backup_retention_period = db_instance["BackupRetentionPeriod"]
-        # max_allocated_storage = db_instance["MaxAllocatedStorage"]
 
-        # print("Max alloc storage", max_allocated_storage)
-
+        if "StorageThroughput" in db_instance:
+            storage_throughput = db_instance["StorageThroughput"]
+            
         if "Iops" in db_instance:
             iops = db_instance["Iops"]
 
         instances[db_instance_identifier] = {"class" : db_instance_class, "storage": allocated_storage, "storageType": storage_type, "storageThroughput": storage_throughput, "network": network_type, "iops": iops, "deployment" : deployment_option, "backup": backup_retention_period, "term": term}
-        # print(db_instance_class, allocated_storage, deployment_option, storage_type, storage_throughput, network_type, iops, backup_retention_period)
 
-        # Pending Modified Values?
     return instances
 
 def get_rds_reserved_instances(client):
